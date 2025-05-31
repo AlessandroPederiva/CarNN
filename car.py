@@ -1,230 +1,278 @@
 import pygame
 import math
 import numpy as np
+from collections import deque
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+from abc import ABC, abstractmethod
+
+@dataclass
+class CarConfig:
+    """Configuration constants for car behavior"""
+    SENSOR_COUNT: int = 5
+    SENSOR_RANGE: float = 10.0
+    SENSOR_SPREAD: float = 90.0
+    MAX_SPEED: float = 15.0
+    MAX_TURN_RATE: float = 9.0
+    WIDTH: float = 2.0
+    LENGTH: float = 4.0
+    MIN_BASE_VELOCITY: float = 2.0
+    ENGINE_BOOST: float = 0.6
+    ACCELERATION_FACTOR: float = 6.0
+    DRAG_FACTOR: float = 0.97
+    HISTORY_SIZE: int = 100
+    NOISE_GENERATION_THRESHOLD: int = 10
+    NOISE_STD: float = 0.3
+
+class CarPhysics:
+    """Handles car physics calculations"""
+    def __init__(self, config: CarConfig):
+        self.config = config
+    def update_velocity(self, current_velocity: float, engine_force: float, 
+                       delta_time: float, is_alive: bool) -> float:
+        total_force = engine_force + self.config.ENGINE_BOOST
+        new_velocity = current_velocity + total_force * delta_time * self.config.ACCELERATION_FACTOR
+        new_velocity = max(-self.config.MAX_SPEED, min(new_velocity, self.config.MAX_SPEED))
+        if is_alive and abs(new_velocity) < self.config.MIN_BASE_VELOCITY:
+            new_velocity = self.config.MIN_BASE_VELOCITY * (1 if new_velocity >= 0 else -1)
+        return new_velocity * self.config.DRAG_FACTOR
+    def update_rotation(self, current_rotation: float, turning_force: float, 
+                       velocity: float, delta_time: float) -> float:
+        turn_amount = turning_force * velocity * delta_time * self.config.MAX_TURN_RATE
+        return current_rotation + turn_amount
+    def update_position(self, current_position: List[float], rotation: float, 
+                       velocity: float, delta_time: float) -> List[float]:
+        rad_rotation = math.radians(rotation)
+        new_x = current_position[0] + math.cos(rad_rotation) * velocity * delta_time
+        new_y = current_position[1] + math.sin(rad_rotation) * velocity * delta_time
+        return [new_x, new_y]
+
+class CarSensors:
+    """Handles car sensor logic"""
+    def __init__(self, config: CarConfig):
+        self.config = config
+        self._cached_angles = self._calculate_sensor_angles()
+    def _calculate_sensor_angles(self) -> List[float]:
+        angle_step = self.config.SENSOR_SPREAD / (self.config.SENSOR_COUNT - 1)
+        return [i * angle_step - self.config.SENSOR_SPREAD/2 
+                for i in range(self.config.SENSOR_COUNT)]
+    def get_readings(self, position: List[float], rotation: float, course) -> List[float]:
+        readings = []
+        for relative_angle in self._cached_angles:
+            sensor_angle = rotation + relative_angle
+            distance = self._cast_ray(position, sensor_angle, course)
+            normalized_distance = min(distance / self.config.SENSOR_RANGE, 1.0)
+            readings.append(normalized_distance)
+        return readings
+    def _cast_ray(self, position: List[float], angle: float, course) -> float:
+        rad_angle = math.radians(angle)
+        ray_dir_x = math.cos(rad_angle)
+        ray_dir_y = math.sin(rad_angle)
+        step_sizes = [1.0, 0.1]
+        current_dist = 0.0
+        for step_size in step_sizes:
+            while current_dist < self.config.SENSOR_RANGE:
+                check_x = position[0] + ray_dir_x * current_dist
+                check_y = position[1] + ray_dir_y * current_dist
+                if course.is_point_in_obstacle(check_x, check_y):
+                    if step_size == 1.0:
+                        current_dist = max(0, current_dist - step_size)
+                        break
+                    else:
+                        return current_dist
+                current_dist += step_size
+        return self.config.SENSOR_RANGE
+
+class FitnessCalculator:
+    """Calculates car fitness with modular components"""
+    def __init__(self):
+        self.weights = {
+            'distance': 1.0,
+            'completion': 1.0,
+            'checkpoints': 100.0,
+            'net_distance': 2.0
+        }
+        self.penalties = {
+            'circular_motion_threshold': 0.25,
+            'start_proximity_threshold': 5.0,
+            'high_turning_threshold': 0.7,
+            'penalty_fitness': 0.01
+        }
+    def calculate(self, car, course) -> float:
+        if self._has_circular_motion_penalty(car, course):
+            return self.penalties['penalty_fitness']
+        if self._has_start_proximity_penalty(car, course):
+            return self.penalties['penalty_fitness']
+        if self._has_excessive_turning_penalty(car):
+            return self.penalties['penalty_fitness']
+        base_fitness = car.distance_traveled * self.weights['distance']
+        completion_bonus = course.get_completion_percentage(car.position) * self.weights['completion']
+        checkpoint_bonus = self._calculate_checkpoint_bonus(car, course)
+        net_distance_bonus = self._calculate_net_distance_bonus(car, course)
+        return base_fitness * (1.0 + completion_bonus) + checkpoint_bonus + net_distance_bonus
+    def _has_circular_motion_penalty(self, car, course) -> bool:
+        if car.distance_traveled <= 2.0:
+            return False
+        net_distance = math.dist(car.position, course.start_position)
+        ratio = net_distance / (car.distance_traveled + 1e-6)
+        return ratio < self.penalties['circular_motion_threshold']
+    def _has_start_proximity_penalty(self, car, course) -> bool:
+        net_distance = math.dist(car.position, course.start_position)
+        return net_distance < self.penalties['start_proximity_threshold']
+    def _has_excessive_turning_penalty(self, car) -> bool:
+        if not hasattr(car, 'turning_history') or car.distance_traveled <= 0.5:
+            return False
+        avg_turn = np.mean([abs(t) for t in car.turning_history])
+        return avg_turn > self.penalties['high_turning_threshold']
+    def _calculate_checkpoint_bonus(self, car, course) -> float:
+        checkpoints_passed = 0
+        for i, checkpoint in enumerate(course.checkpoints):
+            if course.has_passed_checkpoint(car.position, checkpoint):
+                checkpoints_passed = i + 1
+        return checkpoints_passed * self.weights['checkpoints']
+    def _calculate_net_distance_bonus(self, car, course) -> float:
+        net_distance = math.dist(car.position, course.start_position)
+        return net_distance * self.weights['net_distance']
+
+class CarRenderer:
+    """Handles car rendering"""
+    def __init__(self, config: CarConfig):
+        self.config = config
+    def draw(self, screen, car, camera_offset: Tuple[float, float], 
+             scale: float, force_green: bool = False):
+        if not car.alive and not force_green:
+            return
+        self._draw_body(screen, car, camera_offset, scale, force_green)
+        self._draw_sensors(screen, car, camera_offset, scale)
+    def _draw_body(self, screen, car, camera_offset: Tuple[float, float], 
+                   scale: float, force_green: bool):
+        screen_pos = self._world_to_screen(car.position, camera_offset, scale)
+        car_points = self._get_rotated_car_points(car.rotation, screen_pos, scale)
+        color = self._get_car_color(car, force_green)
+        pygame.draw.polygon(screen, color, car_points)
+    def _draw_sensors(self, screen, car, camera_offset: Tuple[float, float], scale: float):
+        screen_pos = self._world_to_screen(car.position, camera_offset, scale)
+        for i in range(self.config.SENSOR_COUNT):
+            angle_step = self.config.SENSOR_SPREAD / (self.config.SENSOR_COUNT - 1)
+            sensor_angle = car.rotation - self.config.SENSOR_SPREAD/2 + i * angle_step
+            distance = car.sensors._cast_ray(car.position, sensor_angle, car.course)
+            end_pos = self._calculate_sensor_end(screen_pos, sensor_angle, distance, scale)
+            pygame.draw.line(screen, (255, 0, 0), screen_pos, end_pos, 1)
+            pygame.draw.circle(screen, (255, 255, 255), end_pos, 3)
+    def _world_to_screen(self, world_pos: List[float], camera_offset: Tuple[float, float], 
+                        scale: float) -> Tuple[int, int]:
+        screen_x = int((world_pos[0] - camera_offset[0]) * scale)
+        screen_y = int((world_pos[1] - camera_offset[1]) * scale)
+        return (screen_x, screen_y)
+    def _get_rotated_car_points(self, rotation: float, screen_pos: Tuple[int, int], 
+                               scale: float) -> List[Tuple[int, int]]:
+        half_length = self.config.LENGTH / 2
+        half_width = self.config.WIDTH / 2
+        corners = [
+            (-half_length, -half_width),
+            (half_length, -half_width),
+            (half_length, half_width),
+            (-half_length, half_width)
+        ]
+        rad_rotation = math.radians(rotation)
+        cos_rot = math.cos(rad_rotation)
+        sin_rot = math.sin(rad_rotation)
+        rotated_points = []
+        for x, y in corners:
+            rot_x = x * cos_rot - y * sin_rot
+            rot_y = x * sin_rot + y * cos_rot
+            screen_x = int(screen_pos[0] + rot_x * scale)
+            screen_y = int(screen_pos[1] + rot_y * scale)
+            rotated_points.append((screen_x, screen_y))
+        return rotated_points
+    def _get_car_color(self, car, force_green: bool) -> Tuple[int, int, int]:
+        if force_green:
+            return (0, 255, 0)
+        try:
+            max_fitness = max(c.fitness for c in car.course.cars)
+            is_best = (car.fitness == max_fitness)
+            return (0, 255, 0) if is_best else (200, 200, 100)
+        except:
+            return (200, 200, 100)
+    def _calculate_sensor_end(self, start_pos: Tuple[int, int], angle: float, 
+                             distance: float, scale: float) -> Tuple[int, int]:
+        rad_angle = math.radians(angle)
+        end_x = int(start_pos[0] + math.cos(rad_angle) * distance * scale)
+        end_y = int(start_pos[1] + math.sin(rad_angle) * distance * scale)
+        return (end_x, end_y)
 
 class Car:
-    def __init__(self, neural_network, start_position, start_rotation):
-        """
-        Initialize a car with a neural network.
-        
-        Args:
-            neural_network: The neural network controlling this car
-            start_position: Initial position (x, y)
-            start_rotation: Initial rotation angle in degrees
-        """
+    """Improved Car class with better separation of concerns"""
+    def __init__(self, neural_network, start_position: Tuple[float, float], 
+                 start_rotation: float, config: Optional[CarConfig] = None):
+        self.config = config or CarConfig()
         self.neural_network = neural_network
         self.position = list(start_position)
         self.rotation = start_rotation
         self.velocity = 0.0
-        self.sensor_count = 5
-        self.sensor_range = 10.0  # Maximum sensor range
-        self.sensor_spread = 90  # Degrees spread of sensors
         self.alive = True
         self.fitness = 0.0
         self.distance_traveled = 0.0
         self.last_position = list(start_position)
-        self.course = None  # Reference to the course this car belongs to
-        
-        # Car dimensions and properties
-        self.width = 2.0
-        self.length = 4.0
-        self.max_speed = 15.0  # Tripled from 5.0
-        self.max_turn_rate = 9.0  # Tripled from 3.0
-    
-    def update(self, course, delta_time):
-        """Update car state based on neural network and environment."""
+        self.course = None
+        self.turning_history = deque(maxlen=self.config.HISTORY_SIZE)
+        self.position_history = deque(maxlen=self.config.HISTORY_SIZE)
+        self.physics = CarPhysics(self.config)
+        self.sensors = CarSensors(self.config)
+        self.fitness_calculator = FitnessCalculator()
+        self.renderer = CarRenderer(self.config)
+        self.time_alive = 0.0  # timer per autodistruzione
+        self.max_circle_time = 4.0  # secondi massimi consentiti in giro in tondo
+    def update(self, course, delta_time: float):
         if not self.alive:
             return
-        
-        # Get sensor readings
-        sensor_readings = self.get_sensor_readings(course)
-        
-        # Process sensor readings through neural network
-        outputs = self.neural_network.process_inputs(sensor_readings)
-        engine_force = outputs[0] * 2.0 - 1.0  # Map from [0,1] to [-1,1]
-        turning_force = outputs[1] * 2.0 - 1.0  # Map from [0,1] to [-1,1]
-        # Track turning force for fitness penalty
-        if not hasattr(self, 'turning_history'):
-            self.turning_history = []
-        self.turning_history.append(turning_force)
-        if len(self.turning_history) > 100:
-            self.turning_history.pop(0)
-        
-        # Apply physics
-        self.apply_physics(engine_force, turning_force, delta_time)
-        
-        # Check for collision
-        if self.check_collision(course):
+        try:
+            self.time_alive += delta_time
+            sensor_readings = self.sensors.get_readings(self.position, self.rotation, course)
+            outputs = self._get_neural_network_outputs(sensor_readings, course)
+            engine_force, turning_force = self._process_network_outputs(outputs)
+            self.turning_history.append(turning_force)
+            self._apply_physics(engine_force, turning_force, delta_time)
+            if self._check_collision(course):
+                self.alive = False
+                return
+            # Autodistruzione se penalità giro in tondo dopo max_circle_time
+            if self.time_alive > self.max_circle_time and self.fitness_calculator._has_circular_motion_penalty(self, course):
+                self.alive = False
+                return
+            self._update_tracking(course)
+        except Exception as e:
+            print(f"Error updating car: {e}")
             self.alive = False
-        
-        # Update fitness (based on distance traveled)
-        current_distance = math.sqrt((self.position[0] - self.last_position[0])**2 + 
-                                    (self.position[1] - self.last_position[1])**2)
+    def _get_neural_network_outputs(self, sensor_readings: List[float], course) -> List[float]:
+        noise_std = 0.0
+        if (hasattr(course, 'genetic_algorithm') and 
+            getattr(course.genetic_algorithm, 'generation_count', 1) <= self.config.NOISE_GENERATION_THRESHOLD):
+            noise_std = self.config.NOISE_STD
+        if hasattr(self.neural_network, 'process_inputs'):
+            return self.neural_network.process_inputs(sensor_readings, noise_std=noise_std)
+        else:
+            return self.neural_network.process_inputs(sensor_readings)
+    def _process_network_outputs(self, outputs: List[float]) -> Tuple[float, float]:
+        # Output continuo: outputs[0] in [-1, 1] (sterzata)
+        engine_force = 1.0
+        turning_force = float(np.tanh(outputs[0]))
+        return engine_force, turning_force
+    def _apply_physics(self, engine_force: float, turning_force: float, delta_time: float):
+        self.velocity = self.physics.update_velocity(
+            self.velocity, engine_force, delta_time, self.alive)
+        self.rotation = self.physics.update_rotation(
+            self.rotation, turning_force, self.velocity, delta_time)
+        self.position = self.physics.update_position(
+            self.position, self.rotation, self.velocity, delta_time)
+    def _check_collision(self, course) -> bool:
+        return course.is_point_in_obstacle(self.position[0], self.position[1])
+    def _update_tracking(self, course):
+        current_distance = math.dist(self.position, self.last_position)
         self.distance_traveled += current_distance
         self.last_position = list(self.position)
-        self.fitness = self.calculate_fitness(course)
-    
-    def get_sensor_readings(self, course):
-        """Get readings from car sensors."""
-        readings = []
-        
-        # Calculate angle between each sensor
-        angle_step = self.sensor_spread / (self.sensor_count - 1)
-        
-        # Calculate readings for each sensor
-        for i in range(self.sensor_count):
-            # Calculate sensor angle relative to car
-            sensor_angle = self.rotation - self.sensor_spread/2 + i * angle_step
-            
-            # Cast ray and get distance to nearest obstacle
-            distance = self.cast_ray(course, sensor_angle)
-            
-            # Normalize reading to [0,1] range
-            normalized_distance = min(distance / self.sensor_range, 1.0)
-            readings.append(normalized_distance)
-        
-        return readings
-    
-    def cast_ray(self, course, angle):
-        """Cast a ray from car position and return distance to nearest obstacle."""
-        ray_dir_x = math.cos(math.radians(angle))
-        ray_dir_y = math.sin(math.radians(angle))
-        
-        # Check for intersection with course boundaries
-        for step in range(int(self.sensor_range * 10)):
-            dist = step / 10.0
-            check_x = self.position[0] + ray_dir_x * dist
-            check_y = self.position[1] + ray_dir_y * dist
-            
-            # Check if point is inside an obstacle
-            if course.is_point_in_obstacle(check_x, check_y):
-                return dist
-        
-        return self.sensor_range
-    
-    def apply_physics(self, engine_force, turning_force, delta_time):
-        """Apply physics to update car position and rotation."""
-        # Set a minimum base velocity if the car is alive and velocity is too low
-        min_base_velocity = 2.0
-        # Add a larger base speed to engine force to ensure movement
-        engine_force += 0.6  # Increased from 0.2
-        
-        # Update velocity based on engine force (tripled acceleration)
-        self.velocity += engine_force * delta_time * 6.0  # Tripled from 2.0
-        self.velocity = max(-self.max_speed, min(self.velocity, self.max_speed))
-        # Ensure minimum base velocity
-        if self.alive and abs(self.velocity) < min_base_velocity:
-            self.velocity = min_base_velocity * (1 if self.velocity >= 0 else -1)
-        
-        # Apply less drag/friction to maintain higher speeds
-        self.velocity *= 0.97  # Reduced drag from 0.95
-        
-        # Update rotation based on turning force and velocity
-        turn_amount = turning_force * self.velocity * delta_time * self.max_turn_rate
-        self.rotation += turn_amount
-        
-        # Update position based on velocity and rotation
-        self.position[0] += math.cos(math.radians(self.rotation)) * self.velocity * delta_time
-        self.position[1] += math.sin(math.radians(self.rotation)) * self.velocity * delta_time
-    
-    def check_collision(self, course):
-        """Check if car collides with any obstacle in the course."""
-        # This is a simplified collision check
-        # A more accurate implementation would check the car's corners
-        return course.is_point_in_obstacle(self.position[0], self.position[1])
-    
-    def calculate_fitness(self, course):
-        """Calculate fitness based on distance traveled and course completion."""
-        # Basic fitness is distance traveled
-        fitness = self.distance_traveled
-        
-        # Bonus for course completion percentage
-        completion = course.get_completion_percentage(self.position)
-        fitness *= (1.0 + completion)
-        
-        # Penalize cars that don't move
-        if self.distance_traveled < 0.5:
-            fitness *= 0.1
-        
-        # Strong bonus for each checkpoint passed
-        checkpoints_passed = 0
-        for i, checkpoint in enumerate(course.checkpoints):
-            if course.has_passed_checkpoint(self.position, checkpoint):
-                checkpoints_passed = i + 1
-        fitness += checkpoints_passed * 100.0  # Large bonus per checkpoint
-
-        # Penalize excessive turning (encourage straight movement)
-        if hasattr(self, 'turning_history'):
-            avg_turn = np.mean([abs(t) for t in self.turning_history])
-            fitness *= max(0.5, 1.0 - avg_turn)  # Reduce fitness if turning a lot
-
-        return fitness
-    
-    def draw(self, screen, camera_offset, scale):
-        """Draw the car on the screen."""
-        if not self.alive:
-            return
-        
-        # Calculate screen position
-        screen_x = (self.position[0] - camera_offset[0]) * scale
-        screen_y = (self.position[1] - camera_offset[1]) * scale
-        
-        # Create car polygon
-        car_points = [
-            (-self.length/2, -self.width/2),
-            (self.length/2, -self.width/2),
-            (self.length/2, self.width/2),
-            (-self.length/2, self.width/2)
-        ]
-        
-        # Rotate and translate points
-        rotated_points = []
-        for x, y in car_points:
-            # Rotate
-            rot_x = x * math.cos(math.radians(self.rotation)) - y * math.sin(math.radians(self.rotation))
-            rot_y = x * math.sin(math.radians(self.rotation)) + y * math.cos(math.radians(self.rotation))
-            
-            # Translate and scale
-            screen_point_x = int(screen_x + rot_x * scale)
-            screen_point_y = int(screen_y + rot_y * scale)
-            
-            rotated_points.append((screen_point_x, screen_point_y))
-        
-        # Draw car body - determine if this is the best car
-        is_best_car = False
-        try:
-            # Find the maximum fitness among all cars
-            max_fitness = max([c.fitness for c in self.course.cars])
-            is_best_car = (self.fitness == max_fitness)
-        except:
-            # If there's any error (like course not being accessible), default to not best
-            pass
-            
-        pygame.draw.polygon(screen, (0, 255, 0) if is_best_car else (200, 200, 100), rotated_points)
-        
-        # Draw sensors
-        self.draw_sensors(screen, camera_offset, scale, self.course)
-    
-    def draw_sensors(self, screen, camera_offset, scale, course):
-        """Draw the car's sensors."""
-        screen_x = (self.position[0] - camera_offset[0]) * scale
-        screen_y = (self.position[1] - camera_offset[1]) * scale
-        
-        angle_step = self.sensor_spread / (self.sensor_count - 1)
-        
-        for i in range(self.sensor_count):
-            sensor_angle = self.rotation - self.sensor_spread/2 + i * angle_step
-            ray_dir_x = math.cos(math.radians(sensor_angle))
-            ray_dir_y = math.sin(math.radians(sensor_angle))
-            
-            # Get sensor reading
-            distance = self.cast_ray(course, sensor_angle)
-            
-            # Draw sensor line
-            end_x = int(screen_x + ray_dir_x * distance * scale)
-            end_y = int(screen_y + ray_dir_y * distance * scale)
-            
-            pygame.draw.line(screen, (255, 0, 0), (int(screen_x), int(screen_y)), (end_x, end_y), 1)
-            
-            # Draw sensor endpoint
-            pygame.draw.circle(screen, (255, 255, 255), (end_x, end_y), 3)
+        self.position_history.append(tuple(self.position))
+        self.fitness = self.fitness_calculator.calculate(self, course)
+    def draw(self, screen, camera_offset: Tuple[float, float], scale: float, 
+             force_green: bool = False):
+        self.renderer.draw(screen, self, camera_offset, scale, force_green)

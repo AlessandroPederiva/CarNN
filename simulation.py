@@ -1,8 +1,8 @@
 import pygame
 import time
 import numpy as np
-from neural_network import NeuralNetwork
-from genetic_algorithm import GeneticAlgorithm, Genotype
+from neural_network import TorchNeuralNetwork
+from genetic_algorithm import GeneticAlgorithm, GeneticAlgorithmConfig, SelectionMethod
 from car import Car
 from course import Course
 
@@ -17,59 +17,98 @@ class Simulation:
         
         # Simulation parameters
         self.population_size = 40  # Increased from 20 for more diversity
-        self.neural_network_topology = [5, 4, 3, 2]  # Input, hidden1, hidden2, output
+        self.neural_network_topology = [5, 12, 8, 1]  # Input, hidden1, hidden2, output (sterzata continua)
         self.camera_offset = [0, 0]
         self.scale = 10.0  # Pixels per unit
         self.generation_finished = False
+        self.orientation_random_range = 30  # +/- gradi di variazione orientamento iniziale
         
         # Create course
         self.create_course()
         
         # Initialize genetic algorithm
         self.initialize_genetic_algorithm()
+        
+        # Best car ever
+        self.best_car_ever = None
+        self.best_fitness_ever = float('-inf')
     
     def create_course(self):
-        """Create a simple course for the simulation."""
-        # Define obstacles (walls)
+        """Crea un percorso a S con muri e checkpoint."""
+        wall_thickness = 5
+        width = 60
+        segment_length = 120
+        # Primo rettilineo orizzontale (basso)
+        base_y1 = 10
+        base_y2 = base_y1 + width
+        # Secondo rettilineo orizzontale (alto)
+        top_y1 = base_y1 + width + 60
+        top_y2 = top_y1 + width
+        # Muri esterni a S
         obstacles = [
-            # Outer walls - rectangle with a gap at the right
-            [(0, 0), (0, 60), (5, 60), (5, 0)],  # Left wall
-            [(0, 0), (100, 0), (100, 5), (0, 5)],  # Top wall
-            [(0, 55), (100, 55), (100, 60), (0, 60)],  # Bottom wall
-            [(95, 0), (100, 0), (100, 60), (95, 60)],  # Right wall
-            
-            # Inner obstacle
-            [(40, 20), (60, 20), (60, 40), (40, 40)]  # Box in the middle
+            # Primo rettilineo basso
+            [(0, base_y1), (segment_length, base_y1), (segment_length, base_y1 + wall_thickness), (0, base_y1 + wall_thickness)],
+            [(0, base_y2 - wall_thickness), (segment_length, base_y2 - wall_thickness), (segment_length, base_y2), (0, base_y2)],
+            # Curva verso l'alto (destra)
+            [(segment_length - wall_thickness, base_y1 + wall_thickness), (segment_length, base_y1 + wall_thickness), (segment_length + width, top_y1), (segment_length + width - wall_thickness, top_y1)],
+            [(segment_length - wall_thickness, base_y2 - wall_thickness), (segment_length, base_y2 - wall_thickness), (segment_length + width, top_y2 - wall_thickness), (segment_length + width - wall_thickness, top_y2 - wall_thickness)],
+            # Secondo rettilineo alto
+            [(segment_length + width, top_y1), (2 * segment_length + width, top_y1), (2 * segment_length + width, top_y1 + wall_thickness), (segment_length + width, top_y1 + wall_thickness)],
+            [(segment_length + width, top_y2 - wall_thickness), (2 * segment_length + width, top_y2 - wall_thickness), (2 * segment_length + width, top_y2), (segment_length + width, top_y2)],
+            # Curva verso il basso (sinistra)
+            [(2 * segment_length + width - wall_thickness, top_y1 + wall_thickness), (2 * segment_length + width, top_y1 + wall_thickness), (2 * segment_length, base_y1), (2 * segment_length - wall_thickness, base_y1)],
+            [(2 * segment_length + width - wall_thickness, top_y2 - wall_thickness), (2 * segment_length + width, top_y2 - wall_thickness), (2 * segment_length, base_y2 - wall_thickness), (2 * segment_length - wall_thickness, base_y2 - wall_thickness)],
+            # Terzo rettilineo basso
+            [(2 * segment_length - wall_thickness, base_y1), (3 * segment_length, base_y1), (3 * segment_length, base_y1 + wall_thickness), (2 * segment_length - wall_thickness, base_y1 + wall_thickness)],
+            [(2 * segment_length - wall_thickness, base_y2 - wall_thickness), (3 * segment_length, base_y2 - wall_thickness), (3 * segment_length, base_y2), (2 * segment_length - wall_thickness, base_y2)],
         ]
-        
-        # Define checkpoints
-        checkpoints = [
-            ((20, 5), (20, 55)),   # First checkpoint
-            ((50, 5), (50, 20)),   # Second checkpoint (above the box)
-            ((50, 40), (50, 55)),  # Third checkpoint (below the box)
-            ((80, 5), (80, 55))    # Fourth checkpoint
-        ]
-        
-        # Define start position and rotation
-        start_position = (10, 30)
+        # Checkpoint lungo la S
+        checkpoints = []
+        # Primo rettilineo
+        for x in range(20, segment_length, 40):
+            checkpoints.append(((x, base_y1 + wall_thickness), (x, base_y2 - wall_thickness)))
+        # Curva destra
+        for i in range(0, 5):
+            t = i / 4
+            cx = segment_length + t * width
+            cy1 = base_y1 + wall_thickness + t * (top_y1 - base_y1 - wall_thickness)
+            cy2 = base_y2 - wall_thickness + t * (top_y2 - base_y2 + wall_thickness)
+            checkpoints.append(((cx, cy1), (cx, cy2)))
+        # Secondo rettilineo
+        for x in range(segment_length + 20, segment_length + width, 40):
+            checkpoints.append(((x, top_y1 + wall_thickness), (x, top_y2 - wall_thickness)))
+        for x in range(segment_length + width + 20, 2 * segment_length + width, 40):
+            checkpoints.append(((x, top_y1 + wall_thickness), (x, top_y2 - wall_thickness)))
+        # Curva sinistra
+        for i in range(0, 5):
+            t = i / 4
+            cx = 2 * segment_length + width - t * width
+            cy1 = top_y1 + wall_thickness - t * (top_y1 + wall_thickness - base_y1 - wall_thickness)
+            cy2 = top_y2 - wall_thickness - t * (top_y2 - wall_thickness - base_y2 + wall_thickness)
+            checkpoints.append(((cx, cy1), (cx, cy2)))
+        # Terzo rettilineo
+        for x in range(2 * segment_length + 20, 3 * segment_length, 40):
+            checkpoints.append(((x, base_y1 + wall_thickness), (x, base_y2 - wall_thickness)))
+        start_position = (15, (base_y1 + base_y2) // 2)
         start_rotation = 0  # Facing right
-        
-        # Create course
         self.course = Course(obstacles, checkpoints, start_position, start_rotation)
     
     def initialize_genetic_algorithm(self):
         """Initialize the genetic algorithm and create initial population."""
-        # Calculate total weights in neural network
-        nn = NeuralNetwork(self.neural_network_topology)
+        nn = TorchNeuralNetwork(self.neural_network_topology, activation='tanh', input_norm=False, dropout_rate=0.1)
         weight_count = nn.weight_count
-        
-        # Create genetic algorithm
-        self.genetic_algorithm = GeneticAlgorithm(weight_count, self.population_size)
-        
-        # Start algorithm to initialize population
+        # Use improved config object
+        config = GeneticAlgorithmConfig(
+            population_size=self.population_size,
+            elite_size=2,
+            selection_method=SelectionMethod.TOURNAMENT,
+            tournament_size=3,
+            crossover_rate=0.8,
+            mutation_rate=0.1,
+            mutation_strength=0.1
+        )
+        self.genetic_algorithm = GeneticAlgorithm(weight_count, config)
         self.population = self.genetic_algorithm.start()
-        
-        # Create cars with neural networks
         self.create_cars()
     
     def create_cars(self):
@@ -77,14 +116,16 @@ class Simulation:
         self.course.cars = []
         
         for genotype in self.population:
-            # Create neural network with topology
-            nn = NeuralNetwork(self.neural_network_topology)
-            
-            # Set weights from genotype parameters
+            nn = TorchNeuralNetwork(self.neural_network_topology, activation='tanh', input_norm=False, dropout_rate=0.1)
+            nn.set_random_weights(-1.0, 1.0)
             nn.set_weights_flattened(genotype.parameters)
             
+            # Variazione casuale orientamento iniziale
+            import random
+            start_rot = self.course.start_rotation + random.uniform(-self.orientation_random_range, self.orientation_random_range)
+            
             # Create car with neural network
-            car = Car(nn, self.course.start_position, self.course.start_rotation)
+            car = Car(nn, self.course.start_position, start_rot)
             self.course.add_car(car)
     
     def update(self, delta_time):
@@ -108,15 +149,24 @@ class Simulation:
         
         # Update camera to follow best car
         self.update_camera()
+        
+        # Aggiorna best car di sempre
+        for car in self.course.cars:
+            if car.fitness > self.best_fitness_ever:
+                self.best_fitness_ever = car.fitness
+                # Salva una copia profonda del best car
+                import copy
+                self.best_car_ever = copy.deepcopy(car)
     
     def create_new_generation(self):
         """Create a new generation of cars using the genetic algorithm."""
         # Process current generation and create new one
-        self.population = self.genetic_algorithm.evaluation_finished()
-        
+        best_params = None
+        if self.best_car_ever is not None:
+            best_params = self.best_car_ever.neural_network.get_weights_flattened()
+        self.population = self.genetic_algorithm.evaluation_finished(best_params=best_params)
         # Create new cars with updated neural networks
         self.create_cars()
-        
         self.generation_finished = False
     
     def update_camera(self):
@@ -147,6 +197,10 @@ class Simulation:
         # Draw course and cars
         self.course.draw(self.screen, self.camera_offset, self.scale)
         
+        # Disegna il best car di sempre (in verde scuro, anche se morto)
+        if self.best_car_ever is not None:
+            self.best_car_ever.draw(self.screen, self.camera_offset, self.scale, force_green=True)
+        
         # Draw UI information
         self.draw_ui()
         
@@ -169,21 +223,27 @@ class Simulation:
         gen_text = font.render(f"Generation: {self.genetic_algorithm.generation_count}", True, (0, 0, 0))
         self.screen.blit(gen_text, (10, 10))
         
+        # Miglior fitness di sempre
+        best_ever_text = font.render(f"Best Ever Fitness: {self.best_fitness_ever:.2f}", True, (0, 100, 0))
+        self.screen.blit(best_ever_text, (10, 40))
+        
         # Draw best fitness
         if best_car:
             fitness_text = font.render(f"Best Fitness: {best_fitness:.2f}", True, (0, 0, 0))
-            self.screen.blit(fitness_text, (10, 40))
+            self.screen.blit(fitness_text, (10, 70))
             
             # Draw neural network outputs if car is alive
             if best_car.alive:
-                outputs = best_car.neural_network.process_inputs(best_car.get_sensor_readings(self.course))
-                output_text = font.render(f"Engine: {outputs[0]:.2f} Turn: {outputs[1]:.2f}", True, (0, 0, 0))
-                self.screen.blit(output_text, (10, 70))
+                outputs = best_car.neural_network.process_inputs(
+                    best_car.sensors.get_readings(best_car.position, best_car.rotation, self.course)
+                )
+                output_text = font.render(f"Steering: {outputs[0]:.2f}", True, (0, 0, 0))
+                self.screen.blit(output_text, (10, 100))
                 
                 # Draw alive cars count
                 alive_count = sum(1 for car in self.course.cars if car.alive)
                 alive_text = font.render(f"Alive: {alive_count}/{len(self.course.cars)}", True, (0, 0, 0))
-                self.screen.blit(alive_text, (10, 100))
+                self.screen.blit(alive_text, (10, 130))
     
     def run(self):
         """Run the main simulation loop."""
