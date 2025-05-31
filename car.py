@@ -41,10 +41,14 @@ class Car:
         
         # Process sensor readings through neural network
         outputs = self.neural_network.process_inputs(sensor_readings)
-        
-        # Extract control values from neural network output
         engine_force = outputs[0] * 2.0 - 1.0  # Map from [0,1] to [-1,1]
         turning_force = outputs[1] * 2.0 - 1.0  # Map from [0,1] to [-1,1]
+        # Track turning force for fitness penalty
+        if not hasattr(self, 'turning_history'):
+            self.turning_history = []
+        self.turning_history.append(turning_force)
+        if len(self.turning_history) > 100:
+            self.turning_history.pop(0)
         
         # Apply physics
         self.apply_physics(engine_force, turning_force, delta_time)
@@ -142,6 +146,18 @@ class Car:
         if self.distance_traveled < 0.5:
             fitness *= 0.1
         
+        # Strong bonus for each checkpoint passed
+        checkpoints_passed = 0
+        for i, checkpoint in enumerate(course.checkpoints):
+            if course.has_passed_checkpoint(self.position, checkpoint):
+                checkpoints_passed = i + 1
+        fitness += checkpoints_passed * 100.0  # Large bonus per checkpoint
+
+        # Penalize excessive turning (encourage straight movement)
+        if hasattr(self, 'turning_history'):
+            avg_turn = np.mean([abs(t) for t in self.turning_history])
+            fitness *= max(0.5, 1.0 - avg_turn)  # Reduce fitness if turning a lot
+
         return fitness
     
     def draw(self, screen, camera_offset, scale):
