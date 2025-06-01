@@ -165,6 +165,20 @@ class Simulation:
             self.population[i].fitness = car.fitness
             self.population[i].evaluated = not car.alive
             
+            # --- AGGIUNTA: behavior descriptor per Hall of Fame/Novelty ---
+            # Esempio: posizione finale e numero checkpoint passati
+            checkpoints_passed = 0
+            for j, checkpoint in enumerate(self.course.checkpoints):
+                if self.course.has_passed_checkpoint(car.position, checkpoint):
+                    checkpoints_passed = j + 1
+            behavior_descriptor = np.array([
+                car.position[0],
+                car.position[1],
+                car.rotation,
+                checkpoints_passed
+            ], dtype=np.float32)
+            self.population[i].behavior_descriptor = behavior_descriptor
+            
             if car.alive:
                 all_dead = False
         

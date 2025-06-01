@@ -1,14 +1,19 @@
 """
-Improved Genetic Algorithm with multiple selection methods and elitism.
+Enhanced Genetic Algorithm with Hall of Fame, Behavior Archive, and improved diversity mechanisms.
 """
 
 import numpy as np
 import random
 import logging
-from typing import List, Optional, Tuple, Dict, Any
+import os
+import json
+import time
+from typing import List, Optional, Tuple, Dict, Any, Set
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+import pickle
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,9 @@ class Genotype:
     parent_ids: Tuple[int, int] = field(default_factory=lambda: (-1, -1))
     generation: int = 0
     id: int = field(default_factory=lambda: random.randint(0, 1000000))
+    # New fields for behavior tracking
+    behavior_descriptor: Optional[np.ndarray] = None
+    novelty_score: float = 0.0
     
     def __lt__(self, other: 'Genotype') -> bool:
         """Enable sorting by fitness (descending)."""
@@ -45,7 +53,9 @@ class Genotype:
             age=self.age,
             parent_ids=self.parent_ids,
             generation=self.generation,
-            id=random.randint(0, 1000000)  # New ID for clone
+            id=random.randint(0, 1000000),  # New ID for clone
+            behavior_descriptor=self.behavior_descriptor.copy() if self.behavior_descriptor is not None else None,
+            novelty_score=self.novelty_score
         )
 
 class SelectionStrategy(ABC):
@@ -145,6 +155,33 @@ class GeneticAlgorithmConfig:
     max_generations: int = 1000
     convergence_threshold: float = 1e-6
     convergence_generations: int = 50
+    hall_of_fame_size: int = 10  # New parameter for Hall of Fame
+    # --- Novelty search parameters ---
+    novelty_weight: float = 0.5  # Weight for novelty in fitness (0=off, 1=novelty only)
+    behavior_archive_size: int = 100  # Max size of behavior archive
+    novelty_k: int = 10  # Number of neighbors for novelty score
+
+# --- Novelty Search/Behavior Archive (stubs, not active in main GA logic) ---
+class BehaviorArchive:
+    """Archive for storing behavior descriptors for novelty search."""
+    def __init__(self, max_size: int = 100):
+        self.archive: List[np.ndarray] = []
+        self.max_size = max_size
+
+    def add(self, descriptor: np.ndarray):
+        self.archive.append(descriptor.copy())
+        if len(self.archive) > self.max_size:
+            self.archive.pop(0)
+
+    def compute_novelty(self, descriptor: np.ndarray, k: int = 10) -> float:
+        if not self.archive:
+            return 0.0
+        dists = [np.linalg.norm(descriptor - b) for b in self.archive]
+        if not dists:
+            return 0.0
+        dists.sort()
+        k = min(k, len(dists))
+        return float(np.mean(dists[:k]))
 
 class GeneticAlgorithm:
     """
@@ -175,6 +212,12 @@ class GeneticAlgorithm:
         
         # Selection strategy
         self.selection_strategy = self._create_selection_strategy()
+        
+        # Hall of Fame
+        self.hall_of_fame: List[Genotype] = []
+        
+        # --- Novelty search ---
+        self.behavior_archive = BehaviorArchive(self.config.behavior_archive_size)
         
         logger.info(f"Initialized GA with {parameter_count} parameters, "
                    f"population size: {self.config.population_size}")
@@ -219,6 +262,35 @@ class GeneticAlgorithm:
         """Process evaluated population and create next generation."""
         if not self.current_population:
             raise RuntimeError("No population to evaluate")
+        # --- Novelty: compute and assign novelty scores ---
+        if self.config.novelty_weight > 0:
+            for ind in self.current_population:
+                if ind.behavior_descriptor is not None:
+                    # Novelty: distance to k nearest in archive + population
+                    all_behaviors = [x.behavior_descriptor for x in self.current_population if x.behavior_descriptor is not None]
+                    if self.behavior_archive.archive:
+                        all_behaviors += self.behavior_archive.archive
+                    if len(all_behaviors) > 1:
+                        dists = [np.linalg.norm(ind.behavior_descriptor - b) for b in all_behaviors if not np.array_equal(b, ind.behavior_descriptor)]
+                        dists.sort()
+                        k = min(self.config.novelty_k, len(dists))
+                        ind.novelty_score = float(np.mean(dists[:k])) if k > 0 else 0.0
+                    else:
+                        ind.novelty_score = 0.0
+                else:
+                    ind.novelty_score = 0.0
+            # --- Combine fitness and novelty ---
+            for ind in self.current_population:
+                ind.fitness = (
+                    (1.0 - self.config.novelty_weight) * ind.fitness +
+                    self.config.novelty_weight * ind.novelty_score
+                )
+        # --- Update archive with new behaviors ---
+        if self.config.novelty_weight > 0:
+            for ind in self.current_population:
+                if ind.behavior_descriptor is not None:
+                    self.behavior_archive.add(ind.behavior_descriptor)
+        # --- Regular GA steps ---
         self._update_statistics()
         if self._check_convergence():
             logger.info(f"Convergence reached at generation {self.generation_count}")
@@ -413,6 +485,48 @@ class GeneticAlgorithm:
         
         logger.info(f"Loaded individual from {filepath}")
         return individual
+    
+    def update_hall_of_fame(self):
+        """Update the Hall of Fame with the best individuals."""
+        if self.best_individual is not None:
+            # Add new best individual to Hall of Fame
+            self.hall_of_fame.append(self.best_individual.clone())
+            
+            # Limit size of Hall of Fame
+            if len(self.hall_of_fame) > self.config.hall_of_fame_size:
+                self.hall_of_fame.pop(0)
+    
+    def save_hall_of_fame(self, filepath: str):
+        """Save the Hall of Fame to a file."""
+        with open(filepath, 'w') as f:
+            for individual in self.hall_of_fame:
+                f.write(f"{individual.fitness},{','.join(map(str, individual.parameters))}\n")
+        
+        logger.info(f"Saved Hall of Fame to {filepath}")
+    
+    def load_hall_of_fame(self, filepath: str):
+        """Load the Hall of Fame from a file."""
+        if not os.path.exists(filepath):
+            logger.warning(f"Hall of Fame file not found: {filepath}")
+            return
+        
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        for line in lines:
+            parts = line.strip().split(',')
+            fitness = float(parts[0])
+            parameters = np.array(list(map(float, parts[1:])))
+            
+            individual = Genotype(
+                parameters=parameters,
+                fitness=fitness,
+                evaluated=True
+            )
+            
+            self.hall_of_fame.append(individual)
+        
+        logger.info(f"Loaded Hall of Fame from {filepath}")
 
 
 if __name__ == "__main__":
@@ -426,7 +540,10 @@ if __name__ == "__main__":
         selection_method=SelectionMethod.TOURNAMENT,
         tournament_size=3,
         crossover_rate=0.8,
-        mutation_rate=0.1
+        mutation_rate=0.1,
+        novelty_weight=0.7,  # pressione novelty
+        behavior_archive_size=300,  # archivio più grande
+        novelty_k=20  # più vicini per la novelty
     )
     
     # Create GA
