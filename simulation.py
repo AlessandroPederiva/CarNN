@@ -278,7 +278,7 @@ class Simulation:
         while self.running:
             # Calculate delta time
             current_time = time.time()
-            delta_time = min(current_time - last_time, 0.1)  # Cap delta time to avoid physics issues
+            delta_time = min(current_time - last_time, 0.1) * 2  # Raddoppia il tempo che passa
             last_time = current_time
             
             # Handle events

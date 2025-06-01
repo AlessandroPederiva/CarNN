@@ -39,6 +39,7 @@ class TrackEditor:
             {"text": "Wall Mode", "action": self.set_wall_mode, "rect": None},
             {"text": "Checkpoint Mode", "action": self.set_checkpoint_mode, "rect": None},
             {"text": "Start Position", "action": self.set_start_mode, "rect": None},
+            {"text": "Eraser", "action": self.set_eraser_mode, "rect": None},  # Nuovo pulsante gomma
             {"text": "Clear All", "action": self.clear_all, "rect": None},
             {"text": "Save Track", "action": self.save_track, "rect": None},
             {"text": "Load Track", "action": self.load_track, "rect": None},
@@ -80,6 +81,11 @@ class TrackEditor:
         """Set editor to start position mode."""
         self.mode = "start"
         self.show_message("Start Position Mode: Click to set start position, scroll to rotate")
+    
+    def set_eraser_mode(self):
+        """Set editor to eraser mode."""
+        self.mode = "eraser"
+        self.show_message("Eraser Mode: Click near a line to delete it")
     
     def clear_all(self):
         """Clear all track elements."""
@@ -198,6 +204,20 @@ class TrackEditor:
         screen_y = int((world_pos[1] - self.camera_offset[1]) * self.scale)
         return (screen_x, screen_y)
     
+    def _distance_point_to_segment(self, point, seg_a, seg_b):
+        """Calcola la distanza minima tra un punto e un segmento."""
+        px, py = point
+        x1, y1 = seg_a
+        x2, y2 = seg_b
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == dy == 0:
+            return math.hypot(px - x1, py - y1)
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        return math.hypot(px - proj_x, py - proj_y)
+    
     def handle_events(self):
         """Handle pygame events."""
         for event in pygame.event.get():
@@ -213,6 +233,15 @@ class TrackEditor:
                     self.set_checkpoint_mode()
                 elif event.key == pygame.K_3:
                     self.set_start_mode()
+                # --- AGGIUNTA: movimento camera con frecce ---
+                elif event.key == pygame.K_LEFT:
+                    self.camera_offset[0] -= 10 / self.scale  # muovi a sinistra
+                elif event.key == pygame.K_RIGHT:
+                    self.camera_offset[0] += 10 / self.scale  # muovi a destra
+                elif event.key == pygame.K_UP:
+                    self.camera_offset[1] -= 10 / self.scale  # muovi in su
+                elif event.key == pygame.K_DOWN:
+                    self.camera_offset[1] += 10 / self.scale  # muovi in giù
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 # Check if clicked on UI buttons
@@ -235,16 +264,30 @@ class TrackEditor:
                                 self.current_line_start = None
                                 self.drawing = False
                                 self.show_message(f"Line added, total lines: {len(self.lines)}")
-                        
                         elif self.mode == "checkpoint":
                             self.drawing = True
                             world_pos = self.screen_to_world(event.pos)
                             self.current_line_start = world_pos
-                        
                         elif self.mode == "start":
                             world_pos = self.screen_to_world(event.pos)
                             self.start_position = world_pos
                             self.show_message(f"Start position set at {world_pos}")
+                        elif self.mode == "eraser":
+                            # Gomma: cancella la linea più vicina al click se abbastanza vicina
+                            mouse_world = self.screen_to_world(event.pos)
+                            min_dist = float('inf')
+                            min_idx = -1
+                            threshold = 10 / self.scale  # 10 pixel in coordinate mondo
+                            for idx, line in enumerate(self.lines):
+                                dist = self._distance_point_to_segment(mouse_world, line[0], line[1])
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    min_idx = idx
+                            if min_dist < threshold and min_idx != -1:
+                                del self.lines[min_idx]
+                                self.show_message("Line deleted")
+                            else:
+                                self.show_message("No line close enough to delete")
                     
                     elif event.button == 3:  # Right mouse button
                         # Cancel current line if drawing
