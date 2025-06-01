@@ -7,7 +7,7 @@ from car import Car
 from course import Course
 
 class Simulation:
-    def __init__(self, screen_width=800, screen_height=600):
+    def __init__(self, screen_width=800, screen_height=600, custom_course=None):
         """Initialize the simulation environment."""
         pygame.init()
         self.screen = pygame.display.set_mode((screen_width, screen_height))
@@ -23,8 +23,12 @@ class Simulation:
         self.generation_finished = False
         self.orientation_random_range = 30  # +/- gradi di variazione orientamento iniziale
         
-        # Create course
-        self.create_course()
+        # Create course or use custom course
+        if custom_course:
+            self.course = custom_course
+            print(f"Using custom course with {len(self.course.lines)} lines and {len(self.course.checkpoints)} checkpoints")
+        else:
+            self.create_default_course()
         
         # Initialize genetic algorithm
         self.initialize_genetic_algorithm()
@@ -33,65 +37,82 @@ class Simulation:
         self.best_car_ever = None
         self.best_fitness_ever = float('-inf')
     
-    def create_course(self):
-        """Crea un percorso a S con muri e checkpoint."""
+    def create_default_course(self):
+        """Create a default S-shaped course with line obstacles."""
         wall_thickness = 5
         width = 60
         segment_length = 120
+        
         # Primo rettilineo orizzontale (basso)
         base_y1 = 10
         base_y2 = base_y1 + width
+        
         # Secondo rettilineo orizzontale (alto)
         top_y1 = base_y1 + width + 60
         top_y2 = top_y1 + width
-        # Muri esterni a S
-        obstacles = [
-            # Primo rettilineo basso
-            [(0, base_y1), (segment_length, base_y1), (segment_length, base_y1 + wall_thickness), (0, base_y1 + wall_thickness)],
-            [(0, base_y2 - wall_thickness), (segment_length, base_y2 - wall_thickness), (segment_length, base_y2), (0, base_y2)],
-            # Curva verso l'alto (destra)
-            [(segment_length - wall_thickness, base_y1 + wall_thickness), (segment_length, base_y1 + wall_thickness), (segment_length + width, top_y1), (segment_length + width - wall_thickness, top_y1)],
-            [(segment_length - wall_thickness, base_y2 - wall_thickness), (segment_length, base_y2 - wall_thickness), (segment_length + width, top_y2 - wall_thickness), (segment_length + width - wall_thickness, top_y2 - wall_thickness)],
-            # Secondo rettilineo alto
-            [(segment_length + width, top_y1), (2 * segment_length + width, top_y1), (2 * segment_length + width, top_y1 + wall_thickness), (segment_length + width, top_y1 + wall_thickness)],
-            [(segment_length + width, top_y2 - wall_thickness), (2 * segment_length + width, top_y2 - wall_thickness), (2 * segment_length + width, top_y2), (segment_length + width, top_y2)],
-            # Curva verso il basso (sinistra)
-            [(2 * segment_length + width - wall_thickness, top_y1 + wall_thickness), (2 * segment_length + width, top_y1 + wall_thickness), (2 * segment_length, base_y1), (2 * segment_length - wall_thickness, base_y1)],
-            [(2 * segment_length + width - wall_thickness, top_y2 - wall_thickness), (2 * segment_length + width, top_y2 - wall_thickness), (2 * segment_length, base_y2 - wall_thickness), (2 * segment_length - wall_thickness, base_y2 - wall_thickness)],
-            # Terzo rettilineo basso
-            [(2 * segment_length - wall_thickness, base_y1), (3 * segment_length, base_y1), (3 * segment_length, base_y1 + wall_thickness), (2 * segment_length - wall_thickness, base_y1 + wall_thickness)],
-            [(2 * segment_length - wall_thickness, base_y2 - wall_thickness), (3 * segment_length, base_y2 - wall_thickness), (3 * segment_length, base_y2), (2 * segment_length - wall_thickness, base_y2)],
-        ]
+        
+        # Create lines for the S-shaped track
+        lines = []
+        
+        # Bottom horizontal segment - top wall
+        lines.append([(0, base_y1), (segment_length, base_y1)])
+        # Bottom horizontal segment - bottom wall
+        lines.append([(0, base_y2), (segment_length, base_y2)])
+        
+        # Right curve - left side
+        lines.append([(segment_length, base_y1), (segment_length + width, top_y1)])
+        # Right curve - right side
+        lines.append([(segment_length, base_y2), (segment_length + width, top_y2)])
+        
+        # Top horizontal segment - top wall
+        lines.append([(segment_length + width, top_y1), (2 * segment_length + width, top_y1)])
+        # Top horizontal segment - bottom wall
+        lines.append([(segment_length + width, top_y2), (2 * segment_length + width, top_y2)])
+        
+        # Left curve - left side
+        lines.append([(2 * segment_length + width, top_y1), (2 * segment_length, base_y1)])
+        # Left curve - right side
+        lines.append([(2 * segment_length + width, top_y2), (2 * segment_length, base_y2)])
+        
+        # Bottom final segment - top wall
+        lines.append([(2 * segment_length, base_y1), (3 * segment_length, base_y1)])
+        # Bottom final segment - bottom wall
+        lines.append([(2 * segment_length, base_y2), (3 * segment_length, base_y2)])
+        
         # Checkpoint lungo la S
         checkpoints = []
         # Primo rettilineo
         for x in range(20, segment_length, 40):
-            checkpoints.append(((x, base_y1 + wall_thickness), (x, base_y2 - wall_thickness)))
+            checkpoints.append(((x, base_y1), (x, base_y2)))
+        
         # Curva destra
         for i in range(0, 5):
             t = i / 4
             cx = segment_length + t * width
-            cy1 = base_y1 + wall_thickness + t * (top_y1 - base_y1 - wall_thickness)
-            cy2 = base_y2 - wall_thickness + t * (top_y2 - base_y2 + wall_thickness)
+            cy1 = base_y1 + t * (top_y1 - base_y1)
+            cy2 = base_y2 + t * (top_y2 - base_y2)
             checkpoints.append(((cx, cy1), (cx, cy2)))
+        
         # Secondo rettilineo
-        for x in range(segment_length + 20, segment_length + width, 40):
-            checkpoints.append(((x, top_y1 + wall_thickness), (x, top_y2 - wall_thickness)))
         for x in range(segment_length + width + 20, 2 * segment_length + width, 40):
-            checkpoints.append(((x, top_y1 + wall_thickness), (x, top_y2 - wall_thickness)))
+            checkpoints.append(((x, top_y1), (x, top_y2)))
+        
         # Curva sinistra
         for i in range(0, 5):
             t = i / 4
             cx = 2 * segment_length + width - t * width
-            cy1 = top_y1 + wall_thickness - t * (top_y1 + wall_thickness - base_y1 - wall_thickness)
-            cy2 = top_y2 - wall_thickness - t * (top_y2 - wall_thickness - base_y2 + wall_thickness)
+            cy1 = top_y1 - t * (top_y1 - base_y1)
+            cy2 = top_y2 - t * (top_y2 - base_y2)
             checkpoints.append(((cx, cy1), (cx, cy2)))
+        
         # Terzo rettilineo
         for x in range(2 * segment_length + 20, 3 * segment_length, 40):
-            checkpoints.append(((x, base_y1 + wall_thickness), (x, base_y2 - wall_thickness)))
+            checkpoints.append(((x, base_y1), (x, base_y2)))
+        
         start_position = (15, (base_y1 + base_y2) // 2)
         start_rotation = 0  # Facing right
-        self.course = Course(obstacles, checkpoints, start_position, start_rotation)
+        
+        self.course = Course(lines, checkpoints, start_position, start_rotation)
     
     def initialize_genetic_algorithm(self):
         """Initialize the genetic algorithm and create initial population."""
@@ -133,6 +154,11 @@ class Simulation:
         # Update all cars
         all_dead = True
         for i, car in enumerate(self.course.cars):
+            # First check for line collisions (new method)
+            if car.alive and self.course.car_collides_with_lines(car):
+                car.alive = False
+            
+            # Then update the car normally
             car.update(self.course, delta_time)
             
             # Update corresponding genotype fitness
