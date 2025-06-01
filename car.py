@@ -10,16 +10,16 @@ from abc import ABC, abstractmethod
 class CarConfig:
     """Configuration constants for car behavior"""
     SENSOR_COUNT: int = 5
-    SENSOR_RANGE: float = 10.0
+    SENSOR_RANGE: float = 12.0
     SENSOR_SPREAD: float = 90.0
-    MAX_SPEED: float = 15.0
-    MAX_TURN_RATE: float = 9.0
-    WIDTH: float = 2.0
-    LENGTH: float = 4.0
-    MIN_BASE_VELOCITY: float = 2.0
-    ENGINE_BOOST: float = 0.6
-    ACCELERATION_FACTOR: float = 6.0
-    DRAG_FACTOR: float = 0.97
+    MAX_SPEED: float = 14.5
+    MAX_TURN_RATE: float = 28.0
+    WIDTH: float = 1.8
+    LENGTH: float = 3.5
+    MIN_BASE_VELOCITY: float = 1.7
+    ENGINE_BOOST: float = 0.4
+    ACCELERATION_FACTOR: float = 6.5
+    DRAG_FACTOR: float = 0.94
     HISTORY_SIZE: int = 100
     NOISE_GENERATION_THRESHOLD: int = 10
     NOISE_STD: float = 0.3
